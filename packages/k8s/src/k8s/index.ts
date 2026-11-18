@@ -233,8 +233,22 @@ export async function execPodStep(
 ): Promise<void> {
   const exec = new k8s.Exec(kc)
   command = fixArgs(command)
-  // Exec returns a websocket. If websocket fails, we should reject the promise. Otherwise, websocket will call a callback. Since at that point, websocket is not failing, we can safely resolve or reject the promise.
-  await new Promise(function (resolve, reject) {
+  await new Promise<void>((resolve, reject) => {
+    let finished = false
+    let heartbeat: ReturnType<typeof setInterval> | undefined
+    const finish = (error?: Error) => {
+      if (finished) return
+      finished = true
+      clearInterval(heartbeat)
+      if (error) reject(error)
+      else resolve()
+    }
+
+    const connectionLost = (reason: string) =>
+      new Error(
+        `Kubernetes exec connection lost before command completion: ${reason}`
+      )
+
     exec
       .exec(
         namespace(),
@@ -246,9 +260,9 @@ export async function execPodStep(
         stdin ?? null,
         false /* tty */,
         resp => {
-          // kube.exec returns an error if exit code is not 0, but we can't actually get the exit code
+          // Kubernetes can report a successful exit without a numeric code.
           if (resp.status === 'Success') {
-            resolve(resp.code)
+            finish()
           } else {
             core.debug(
               JSON.stringify({
@@ -256,13 +270,42 @@ export async function execPodStep(
                 details: resp?.details
               })
             )
-            reject(resp?.message)
+            finish(new Error(resp.message || 'Kubernetes exec failed'))
           }
         }
       )
-      // If exec.exec fails, explicitly reject the outer promise
-      // eslint-disable-next-line github/no-then
-      .catch(e => reject(e))
+      .then(socket => {
+        const failConnection = (reason: string) => {
+          if (finished) return
+          finish(connectionLost(reason))
+          socket.terminate()
+        }
+        socket.on('error', error => failConnection(error.message))
+        socket.once('close', code => {
+          finish(connectionLost(`WebSocket closed (${code})`))
+        })
+
+        if (finished) return
+        if (socket.readyState !== socket.OPEN) {
+          finish(connectionLost('WebSocket is no longer open'))
+          return
+        }
+
+        let lastPong = Date.now()
+        socket.on('pong', () => {
+          lastPong = Date.now()
+        })
+        heartbeat = setInterval(() => {
+          if (Date.now() - lastPong >= 60_000) {
+            failConnection('WebSocket heartbeat timed out')
+          } else {
+            socket.ping(undefined, undefined, (error?: Error) => {
+              if (error) failConnection(`WebSocket ping failed: ${error.message}`)
+            })
+          }
+        }, 5_000)
+      })
+      .catch(error => finish(connectionLost(String(error))))
   })
 }
 

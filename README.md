@@ -3,6 +3,16 @@ The Runner Container Hooks repo provides a set of packages that implement the co
 
 More information on how to implement your own hooks can be found in the [adr](https://github.com/actions/runner/pull/1891). The `examples` folder provides example inputs for each hook.
 
+## Patched Kubernetes runner image
+
+The Kubernetes hook fails the step if its `exec` connection is lost before a final command status arrives.
+
+To build the image, run the image build workflow with `image: actions-runner-fail-closed`, a versioned `tag`, and this checkout's published commit SHA as `hooks_commit`.
+
+The Docker build fetches the pinned source from this public fork without credentials, runs the disconnect regression tests, and replaces only the Kubernetes hook in the official runner image. Validate the image on a canary scale set before rolling it out.
+
+Remove this patch once the official runner image bundles a fix for [upstream issue #396](https://github.com/actions/runner-container-hooks/issues/396) and the regression tests pass against the bundled hook.
+
 ## Background 
 
 Three projects are included in the `packages` folder
